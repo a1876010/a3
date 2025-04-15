@@ -233,7 +233,7 @@ void A_input(struct pkt packet)
 void A_timerinterrupt(void)
 {
     int timedout_seq;
-    int i; /* Moved declaration to the beginning of the function */
+    int i;
     
     timedout_seq = GetNextTimeout();
     
@@ -305,13 +305,13 @@ void B_input(struct pkt packet)
         
         /* Check if packet is within the receiver window */
         if (IsInWindow(packet.seqnum, rcv_base, (rcv_base + WINDOWSIZE - 1) % SEQSPACE)) {
-            /* Store packet and mark as received */
+            /* Store packet and mark as received if not already */
             if (!received[packet.seqnum]) {
                 rcvbuffer[packet.seqnum] = packet;
                 received[packet.seqnum] = 1;
                 packets_received++;
                 
-                /* If packet is the expected one, deliver it and any consecutive buffered packets */
+                /* If packet is the base one expected, deliver it and any consecutive buffered packets */
                 if (packet.seqnum == rcv_base) {
                     do {
                         /* Deliver to application layer */
@@ -328,43 +328,52 @@ void B_input(struct pkt packet)
             
             /* Send ACK for the received packet */
             sendpkt.acknum = packet.seqnum;
+            
+            /* Create ACK packet */
+            sendpkt.seqnum = B_nextseqnum;
+            B_nextseqnum = (B_nextseqnum + 1) % SEQSPACE;
+                
+            /* We don't have any data to send. Fill payload with 0's */
+            for (i = 0; i < 20; i++)
+                sendpkt.payload[i] = '0';
+                
+            /* Compute checksum */
+            sendpkt.checksum = ComputeChecksum(sendpkt);
+                
+            /* Send ACK packet */
+            tolayer3(B, sendpkt);
         }
         else {
-            /* Packet outside the receiver window */
-            if (TRACE > 0)
-                printf("----B: packet %d outside receive window\n", packet.seqnum);
+            /* Packet outside the receiver window - may need to ack if it's a duplicate */
+            int lower_bound = (rcv_base + SEQSPACE - WINDOWSIZE) % SEQSPACE;
+            int upper_bound = (rcv_base - 1 + SEQSPACE) % SEQSPACE;
             
-            /* If it's before rcv_base, it's a duplicate, ack it again */
-            if (((rcv_base > packet.seqnum) && (rcv_base - packet.seqnum <= SEQSPACE/2)) ||
-                ((rcv_base < packet.seqnum) && (packet.seqnum - rcv_base > SEQSPACE/2))) {
+            if (IsInWindow(packet.seqnum, lower_bound, upper_bound)) {
+                /* It's a previously received packet, send ACK again */
+                if (TRACE > 0)
+                    printf("----B: packet %d is duplicate, send ACK\n", packet.seqnum);
+                
                 sendpkt.acknum = packet.seqnum;
+                sendpkt.seqnum = B_nextseqnum;
+                B_nextseqnum = (B_nextseqnum + 1) % SEQSPACE;
+                
+                for (i = 0; i < 20; i++)
+                    sendpkt.payload[i] = '0';
+                
+                sendpkt.checksum = ComputeChecksum(sendpkt);
+                tolayer3(B, sendpkt);
             }
             else {
-                /* Otherwise ignore packet */
-                return;
+                if (TRACE > 0)
+                    printf("----B: packet %d outside receiver window, ignored\n", packet.seqnum);
             }
         }
     }
     else {
-        /* Corrupted packet */
+        /* Corrupted packet - in SR we don't send NAKs, so just ignore */
         if (TRACE > 0)
             printf("----B: packet corrupted\n");
-        return;  /* For SR, don't ACK corrupted packets */
     }
-
-    /* Create ACK packet */
-    sendpkt.seqnum = B_nextseqnum;
-    B_nextseqnum = (B_nextseqnum + 1) % SEQSPACE;
-        
-    /* We don't have any data to send. Fill payload with 0's */
-    for (i = 0; i < 20; i++)
-        sendpkt.payload[i] = '0';
-        
-    /* Compute checksum */
-    sendpkt.checksum = ComputeChecksum(sendpkt);
-        
-    /* Send ACK packet */
-    tolayer3(B, sendpkt);
 }
 
 /* Called once before any other entity B routines */
