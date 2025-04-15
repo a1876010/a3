@@ -232,7 +232,10 @@ void A_input(struct pkt packet)
 /* Called when A's timer goes off */
 void A_timerinterrupt(void)
 {
-    int timedout_seq = GetNextTimeout();
+    int timedout_seq;
+    int i; /* Moved declaration to the beginning of the function */
+    
+    timedout_seq = GetNextTimeout();
     
     if (timedout_seq != -1) {
         if (TRACE > 0)
@@ -243,7 +246,6 @@ void A_timerinterrupt(void)
         packets_resent++;
         
         /* Mark this timer as inactive and start a new one */
-        int i;
         for (i = 0; i < SEQSPACE; i++) {
             if (timer_array[i].active && timer_array[i].seqnum == timedout_seq) {
                 timer_array[i].active = 0;
