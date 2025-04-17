@@ -26,11 +26,11 @@
 #define WINDOWSIZE 6    /* the maximum number of buffered unacked packet */
 #define SEQSPACE 7       /* the min sequence space for GBN must be at least windowsize + 1 */
 #define NOTINUSE (-1)    /* used to fill header fields that are not being used */
-#define MAX_RETRANSMISSIONS 5  /* maximum number of retransmission attempts per packet */
-#define RTT_ALPHA 0.125    /* weight for new RTT sample in EWMA calculation */
-#define RTT_BETA 0.25      /* weight for new RTT variance in EWMA calculation */
-#define RTT_MIN 8.0        /* minimum RTT value to prevent over-aggressive timing */
-#define RTT_MAX 64.0       /* maximum RTT value to prevent excessive delay */
+define MAX_RETRANSMISSIONS 5  /* maximum number of retransmission attempts per packet */
+#define RTT_ALPHA 0.125  /* weight for new RTT sample in EWMA calculation */
+#define RTT_BETA 0.25    /* weight for new RTT variance in EWMA calculation */
+#define RTT_MIN 8.0      /* minimum RTT value to prevent over-aggressive timing */
+#define RTT_MAX 64.0     /* maximum RTT value to prevent excessive delay */
 #define FAST_RETRANSMIT_THRESHOLD 3  /* threshold for duplicate ACKs to trigger fast retransmit */
 
 /* generic procedure to compute the checksum of a packet. Used by both sender and receiver  
@@ -71,9 +71,10 @@ static float dev_rtt;                  /* RTT deviation for timeout calculation 
 static int retransmission_count[WINDOWSIZE]; /* count of retransmissions per packet */
 static int dup_ack_count[SEQSPACE];    /* count of duplicate ACKs received per sequence number */
 static int last_ack;                   /* last ACK received */
-static int timeout_interval;           /* dynamic timeout interval based on network conditions */
+static float timeout_interval;         /* dynamic timeout interval based on network conditions */
 static int network_condition;          /* 0: normal, 1: high loss, 2: high reordering */
 static int consecutive_timeouts;       /* track consecutive timeouts to detect severe loss */
+static float packet_send_time[WINDOWSIZE]; /* store send time for each packet for RTT calculation */
 
 /* called from layer 5 (application layer), passed the message to be sent to other side */
 void A_output(struct msg message)
@@ -100,6 +101,9 @@ void A_output(struct msg message)
     
     /* reset retransmission counter for this packet position */
     retransmission_count[windowlast] = 0;
+    
+    /* Store the send time for RTT calculation */
+    packet_send_time[windowlast] = get_sim_time();
 
     /* send out packet */
     if (TRACE > 0)
@@ -130,6 +134,7 @@ void A_input(struct pkt packet)
   int ackcount = 0;
   int i;
   float sample_rtt;
+  int resend_idx;
 
   /* if received ACK is not corrupted */ 
   if (!IsCorrupted(packet)) {
@@ -154,10 +159,13 @@ void A_input(struct pkt packet)
           
           /* Update estimated RTT (only for non-retransmitted packets) */
           if (retransmission_count[windowfirst] == 0) {
-            sample_rtt = get_sim_time() - packet.timestamp;
+            /* Calculate RTT using stored send time */
+            sample_rtt = get_sim_time() - packet_send_time[windowfirst];
+            
             /* Update RTT using EWMA (Exponentially Weighted Moving Average) */
             estimated_rtt = (1 - RTT_ALPHA) * estimated_rtt + RTT_ALPHA * sample_rtt;
             dev_rtt = (1 - RTT_BETA) * dev_rtt + RTT_BETA * fabs(sample_rtt - estimated_rtt);
+            
             /* Update timeout using RTT and deviation (Jacobson's algorithm) */
             timeout_interval = estimated_rtt + 4 * dev_rtt;
             
@@ -209,7 +217,7 @@ void A_input(struct pkt packet)
               printf("----A: Fast retransmit triggered for packet %d\n", (packet.acknum + 1) % SEQSPACE);
             
             /* Find the packet to retransmit */
-            int resend_idx = -1;
+            resend_idx = -1;
             for (i = 0; i < windowcount; i++) {
               if (buffer[(windowfirst + i) % WINDOWSIZE].seqnum == (packet.acknum + 1) % SEQSPACE) {
                 resend_idx = (windowfirst + i) % WINDOWSIZE;
@@ -227,13 +235,15 @@ void A_input(struct pkt packet)
         }
       }
     }
-    else
+    else {
       if (TRACE > 0)
         printf("----A: duplicate ACK received, do nothing!\n");
+    }
   }
-  else 
+  else {
     if (TRACE > 0)
       printf("----A: corrupted ACK is received, do nothing!\n");
+  }
 }
 
 /* called when A's timer goes off */
@@ -241,6 +251,7 @@ void A_timerinterrupt(void)
 {
   int i;
   float backoff_factor = 1.0;
+  int pkt_idx;
 
   if (TRACE > 0)
     printf("----A: time out, resend packets!\n");
@@ -250,8 +261,9 @@ void A_timerinterrupt(void)
   /* Exponential backoff for consecutive timeouts (indicates severe congestion) */
   if (consecutive_timeouts > 1) {
     /* Calculate backoff factor (2^n capped at 8) */
-    backoff_factor = (consecutive_timeouts > 3) ? 8.0 : (1 << consecutive_timeouts);
-    timeout_interval = fmin(timeout_interval * backoff_factor, RTT_MAX);
+    backoff_factor = (consecutive_timeouts > 3) ? 8.0 : (float)(1 << consecutive_timeouts);
+    timeout_interval = (timeout_interval * backoff_factor < RTT_MAX) ? 
+                        timeout_interval * backoff_factor : RTT_MAX;
     
     if (TRACE > 0)
       printf("----A: consecutive timeout #%d, backing off timeout to %.2f\n", 
@@ -267,7 +279,7 @@ void A_timerinterrupt(void)
   
   /* Resend all unacknowledged packets */
   for (i = 0; i < windowcount; i++) {
-    int pkt_idx = (windowfirst + i) % WINDOWSIZE;
+    pkt_idx = (windowfirst + i) % WINDOWSIZE;
     
     /* Check if we've exceeded retransmission limit for this packet */
     if (retransmission_count[pkt_idx] < MAX_RETRANSMISSIONS) {
@@ -275,8 +287,8 @@ void A_timerinterrupt(void)
         printf("---A: resending packet %d (attempt %d/%d)\n", 
                buffer[pkt_idx].seqnum, retransmission_count[pkt_idx] + 1, MAX_RETRANSMISSIONS);
       
-      /* Add timestamp to packet for RTT measurement */
-      buffer[pkt_idx].timestamp = get_sim_time();
+      /* Update send time for retransmitted packet */
+      packet_send_time[pkt_idx] = get_sim_time();
       
       tolayer3(A, buffer[pkt_idx]);
       packets_resent++;
@@ -300,6 +312,8 @@ void A_timerinterrupt(void)
 /* entity A routines are called. You can use it to do any initialization */
 void A_init(void)
 {
+  int i;
+  
   /* initialise A's window, buffer and sequence number */
   A_nextseqnum = 0;  /* A starts with seq num 0, do not change this */
   windowfirst = 0;
@@ -310,17 +324,17 @@ void A_init(void)
   windowcount = 0;
   
   /* Initialize adaptive parameters */
-  estimated_rtt = BASE_RTT;
-  dev_rtt = BASE_RTT / 2;
-  timeout_interval = BASE_RTT * 2;
+  estimated_rtt = RTT;
+  dev_rtt = RTT / 2;
+  timeout_interval = RTT * 2;
   last_ack = -1;
   consecutive_timeouts = 0;
   network_condition = 0; /* Start assuming normal network conditions */
   
   /* Initialize retransmission and duplicate ACK counters */
-  int i;
   for (i = 0; i < WINDOWSIZE; i++) {
     retransmission_count[i] = 0;
+    packet_send_time[i] = 0.0;
   }
   
   for (i = 0; i < SEQSPACE; i++) {
@@ -353,9 +367,6 @@ void B_input(struct pkt packet)
 
   /* if not corrupted */
   if (!IsCorrupted(packet)) {
-    /* Add timestamp to outgoing ACK packets for RTT calculation */
-    sendpkt.timestamp = get_sim_time();
-    
     /* Handle expected packet */
     if (packet.seqnum == expectedseqnum) {
       if (TRACE > 0)
@@ -435,12 +446,13 @@ void B_input(struct pkt packet)
 /* entity B routines are called. You can use it to do any initialization */
 void B_init(void)
 {
+  int i;
+  
   expectedseqnum = 0;
   B_nextseqnum = 1;
   reordering_detected = 0;
   
   /* Initialize out-of-order packet buffer */
-  int i;
   for (i = 0; i < SEQSPACE; i++) {
     out_of_order_pkts[i] = 0;
   }
@@ -466,13 +478,4 @@ void B_output(struct msg message)
 /* called when B's timer goes off */
 void B_timerinterrupt(void)
 {
-}
-
-/* Helper function to simulate get_sim_time() which would return current simulation time */
-float get_sim_time(void)
-{
-  /* In the actual simulation, this would return the current simulation time */
-  /* For this exercise, just return a placeholder value */
-  /* This function should be provided by the simulation environment */
-  return 0.0;
 }
