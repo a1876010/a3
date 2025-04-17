@@ -29,11 +29,9 @@
 
 int ComputeChecksum(struct pkt packet) {
   int checksum = 0;
-  int i;
-  checksum = packet.seqnum;
-  checksum += packet.acknum;
-  for (i = 0; i < 20; i++) 
+  for (int i = 0; i < 20; i++)
     checksum += (int)(packet.payload[i]);
+  checksum += packet.seqnum + packet.acknum;
   return checksum;
 }
 
@@ -42,43 +40,52 @@ bool IsCorrupted(struct pkt packet) {
 }
 
 /********* Sender (A) variables and functions ************/
-
 static struct pkt buffer[WINDOWSIZE];
-static float send_times[WINDOWSIZE];
-static int retry_count[WINDOWSIZE];
-
 static int windowfirst, windowlast;
 static int windowcount;
 static int A_nextseqnum;
 
+/* Tuning related variables */
 static float estimatedRTT = RTT;
-static float devRTT = 0;
-static float timeoutInterval = RTT;
+static float devRTT = 0.0;
 static float alpha = 0.125;
 static float beta = 0.25;
-#define MAX_RETRIES 10
+static float timeoutInterval = RTT;
+static float send_times[WINDOWSIZE];
+static int retransmit_count[WINDOWSIZE];
+static int MAX_RETRIES = 5;
+
+extern float get_sim_time();  
+
+void SetMaxRetries(int level) {
+  int retries[3] = {5, 10, 15};  
+  MAX_RETRIES = retries[level];
+  for (int i = 0; i < WINDOWSIZE; i++)
+    retransmit_count[i] = 0;
+}
 
 void A_output(struct msg message) {
   struct pkt sendpkt;
   int i;
-
   if (windowcount < WINDOWSIZE) {
     if (TRACE > 1)
       printf("----A: New message arrives, send window is not full, send new message to layer3!\n");
 
     sendpkt.seqnum = A_nextseqnum;
     sendpkt.acknum = NOTINUSE;
-    for (i = 0; i < 20; i++) 
+    for (i = 0; i < 20; i++)
       sendpkt.payload[i] = message.data[i];
     sendpkt.checksum = ComputeChecksum(sendpkt);
 
     windowlast = (windowlast + 1) % WINDOWSIZE;
     buffer[windowlast] = sendpkt;
     windowcount++;
-
-    tolayer3(A, sendpkt);
+    retransmit_count[windowlast] = 0;
     send_times[windowlast] = get_sim_time();
-    retry_count[windowlast] = 0;
+
+    if (TRACE > 0)
+      printf("Sending packet %d to layer 3\n", sendpkt.seqnum);
+    tolayer3(A, sendpkt);
 
     if (windowcount == 1)
       starttimer(A, timeoutInterval);
@@ -110,17 +117,18 @@ void A_input(struct pkt packet) {
           printf("----A: ACK %d is not a duplicate\n", packet.acknum);
         new_ACKs++;
 
-        if (packet.acknum >= seqfirst)
-          ackcount = packet.acknum + 1 - seqfirst;
-        else
-          ackcount = SEQSPACE - seqfirst + packet.acknum;
-
         float sampleRTT = get_sim_time() - send_times[windowfirst];
         estimatedRTT = (1 - alpha) * estimatedRTT + alpha * sampleRTT;
         devRTT = (1 - beta) * devRTT + beta * fabs(sampleRTT - estimatedRTT);
         timeoutInterval = estimatedRTT + 4 * devRTT;
 
+        if (packet.acknum >= seqfirst)
+          ackcount = packet.acknum + 1 - seqfirst;
+        else
+          ackcount = SEQSPACE - seqfirst + packet.acknum;
+
         windowfirst = (windowfirst + ackcount) % WINDOWSIZE;
+
         for (i = 0; i < ackcount; i++)
           windowcount--;
 
@@ -132,30 +140,30 @@ void A_input(struct pkt packet) {
       if (TRACE > 0)
         printf("----A: duplicate ACK received, do nothing!\n");
     }
-  } else {
-    if (TRACE > 0)
-      printf("----A: corrupted ACK is received, do nothing!\n");
+  } else if (TRACE > 0) {
+    printf("----A: corrupted ACK is received, do nothing!\n");
   }
 }
 
 void A_timerinterrupt(void) {
-  int i;
   if (TRACE > 0)
-    printf("----A: time out, resend packets!\n");
+    printf("----A: timeout, resend packets!\n");
 
-  for (i = 0; i < windowcount; i++) {
-    int idx = (windowfirst + i) % WINDOWSIZE;
-    if (retry_count[idx] < MAX_RETRIES) {
-      tolayer3(A, buffer[idx]);
-      retry_count[idx]++;
+  for (int i = 0; i < windowcount; i++) {
+    int index = (windowfirst + i) % WINDOWSIZE;
+    if (retransmit_count[index] < MAX_RETRIES) {
+      if (TRACE > 0)
+        printf("---A: resending packet %d\n", buffer[index].seqnum);
+      tolayer3(A, buffer[index]);
+      retransmit_count[index]++;
+      send_times[index] = get_sim_time();
       packets_resent++;
-      send_times[idx] = get_sim_time();
-      if (i == 0) starttimer(A, timeoutInterval);
     } else {
       if (TRACE > 0)
-        printf("---A: packet %d reached max retries, giving up.\n", buffer[idx].seqnum);
+        printf("---A: packet %d exceeds retry limit, dropped\n", buffer[index].seqnum);
     }
   }
+  starttimer(A, timeoutInterval);
 }
 
 void A_init(void) {
@@ -163,11 +171,20 @@ void A_init(void) {
   windowfirst = 0;
   windowlast = -1;
   windowcount = 0;
+
+  estimatedRTT = RTT;
+  devRTT = 0.0;
   timeoutInterval = RTT;
+
+  for (int i = 0; i < WINDOWSIZE; i++) {
+    retransmit_count[i] = 0;
+    send_times[i] = 0.0;
+  }
+
+  SetMaxRetries(0);  
 }
 
-/********* Receiver (B) ************/
-
+/********* Receiver (B)  variables and procedures ************/
 static int expectedseqnum;
 static int B_nextseqnum;
 
@@ -175,7 +192,7 @@ void B_input(struct pkt packet) {
   struct pkt sendpkt;
   int i;
 
-  if (!IsCorrupted(packet) && packet.seqnum == expectedseqnum) {
+  if ((!IsCorrupted(packet)) && (packet.seqnum == expectedseqnum)) {
     if (TRACE > 0)
       printf("----B: packet %d is correctly received, send ACK!\n", packet.seqnum);
     packets_received++;
@@ -186,16 +203,15 @@ void B_input(struct pkt packet) {
   } else {
     if (TRACE > 0)
       printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
-    if (expectedseqnum == 0)
-      sendpkt.acknum = SEQSPACE - 1;
-    else
-      sendpkt.acknum = expectedseqnum - 1;
+    sendpkt.acknum = (expectedseqnum == 0) ? SEQSPACE - 1 : expectedseqnum - 1;
   }
 
   sendpkt.seqnum = B_nextseqnum;
   B_nextseqnum = (B_nextseqnum + 1) % 2;
-  for (i = 0; i < 20; i++) 
+
+  for (i = 0; i < 20; i++)
     sendpkt.payload[i] = '0';
+
   sendpkt.checksum = ComputeChecksum(sendpkt);
   tolayer3(B, sendpkt);
 }
@@ -207,17 +223,3 @@ void B_init(void) {
 
 void B_output(struct msg message) {}
 void B_timerinterrupt(void) {}
-
-/********* Additional Tuning API ************/
-
-void SetAlphaBeta(float new_alpha, float new_beta) {
-  alpha = new_alpha;
-  beta = new_beta;
-}
-
-void SetMaxRetries(int retries) {
-  for (int i = 0; i < WINDOWSIZE; i++)
-    retry_count[i] = 0;
-  #undef MAX_RETRIES
-  #define MAX_RETRIES retries
-}
