@@ -1,4 +1,3 @@
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -85,7 +84,7 @@ void A_output(struct msg message)
     /* windowlast will always be 0 for alternating bit; but not for GoBackN */
     windowlast = (windowlast + 1) % WINDOWSIZE; 
     buffer[windowlast] = sendpkt;
-    acked[windowlast] = false;  // Mark as not yet acknowledged
+    acked[windowlast] = false;  /* Mark as not yet acknowledged */
     windowcount++;
 
     /* send out packet */
@@ -194,6 +193,8 @@ void A_timerinterrupt(void)
 /* entity A routines are called. You can use it to do any initialization */
 void A_init(void)
 {
+  int i;
+  
   /* initialise A's window, buffer and sequence number */
   A_nextseqnum = 0;  /* A starts with seq num 0, do not change this */
   windowfirst = 0;
@@ -204,7 +205,6 @@ void A_init(void)
   windowcount = 0;
   
   /* Initialize the acked array */
-  int i;
   for (i = 0; i < WINDOWSIZE; i++) {
     acked[i] = false;
   }
@@ -225,18 +225,21 @@ void B_input(struct pkt packet)
 {
   struct pkt sendpkt;
   int i;
+  int seqnum;
+  int offset;
+  int bufIndex;
 
   /* if not corrupted */
   if (!IsCorrupted(packet)) {
-    int seqnum = packet.seqnum;
+    seqnum = packet.seqnum;
     
     /* Calculate the offset from the start of the receive window */
-    int offset = (seqnum - recv_base + SEQSPACE) % SEQSPACE;
+    offset = (seqnum - recv_base + SEQSPACE) % SEQSPACE;
     
     /* Check if the packet is within our receive window */
     if (offset < WINDOWSIZE) {
       /* Store the received packet */
-      int bufIndex = offset;
+      bufIndex = offset;
       recv_buffer[bufIndex] = packet;
       received[bufIndex] = true;
       
@@ -304,12 +307,13 @@ void B_input(struct pkt packet)
 /* entity B routines are called. You can use it to do any initialization */
 void B_init(void)
 {
+  int i;
+  
   expectedseqnum = 0;
   B_nextseqnum = 1;
   recv_base = 0;
   
   /* Initialize receiver buffer */
-  int i;
   for (i = 0; i < WINDOWSIZE; i++) {
     received[i] = false;
   }
