@@ -1,0 +1,16 @@
+-----  Stop and Wait Network Simulator Version 1.1 -------- 
+
+Enter the number of messages to simulate: Enter  packet loss probability [enter 0.0 for no loss]:Enter packet corruption probability [0.0 for no corruption]:Enter average time between messages from sender's layer5 [ > 0.0]:Enter TRACE:          GENERATE NEXT ARRIVAL: creating new arrival
+            INSERTEVENT: time is 0.000000
+            INSERTEVENT: future time will be 0.000000
+
+EVENT time: 0.000000,  type: 1, fromlayer5  entity: 0
+          FROM_LAYER5: no more messages to send: 
+ Simulator terminated at time 0.000000
+ after attempting to send 0 msgs from layer5
+number of messages dropped due to full window:  0 
+number of valid (not corrupt or duplicate) acknowledgements received at A:  0 
+(note: a single acknowledgement may have acknowledged more than one packet - if cumulative acknowledgements are used)
+number of packet resends by A:  0 
+number of correct packets received at B:  0 
+number of messages delivered to application:  0 
